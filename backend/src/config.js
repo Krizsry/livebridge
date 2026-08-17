@@ -72,6 +72,20 @@ export const config = {
     latencyMs: int('SRT_LATENCY_MS', 300, { min: 20, max: 8000 }),
   },
 
+  /**
+   * Serve the SRT passphrase to the dashboard via GET /api/credentials.
+   *
+   * OFF by default, and it must stay that way for any deployment where the
+   * dashboard is reachable beyond a trusted LAN. There is no application-level
+   * login (requirement 12), so anyone who can load the dashboard can read the
+   * passphrase when this is on - and SRS supports exactly ONE passphrase for
+   * the whole listener, so it is the single highest-value secret in the system.
+   *
+   * Turning this on is only defensible while port 443 is restricted to the
+   * local subnet and never forwarded from the router (see PORT_FORWARDING.md).
+   */
+  exposePassphraseInDashboard: bool('EXPOSE_PASSPHRASE_IN_DASHBOARD', false),
+
   // --- Live metrics ---------------------------------------------------------
   pollIntervalMs: int('POLL_INTERVAL_MS', 1000, { min: 250, max: 10000 }),
   reconnectGraceSec: int('RECONNECT_GRACE_SEC', 15, { min: 0, max: 600 }),
@@ -125,6 +139,10 @@ export const publicConfig = {
   srtLatencyMs: config.srt.latencyMs,
   // Tells the UI whether to show "encryption enabled" - not the value itself.
   srtEncrypted: config.srt.passphrase.length > 0,
+  // Whether GET /api/credentials will serve the passphrase. The value itself is
+  // NEVER included here - this only tells the UI whether to render the control.
+  passphraseRevealEnabled: config.exposePassphraseInDashboard
+    && config.srt.passphrase.length > 0,
   supabaseConfigured: config.supabase.enabled
     && config.supabase.url.length > 0
     && config.supabase.serviceRoleKey.length > 0,

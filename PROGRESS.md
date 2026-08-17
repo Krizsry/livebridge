@@ -1967,6 +1967,42 @@ adds a container, a protocol, a licensed dependency and a large amount of LAN tr
 
 - **Nothing in the running stack was modified.** The test publisher was stopped after the run.
 
+### [2026-08-17 11:35] — Windows setup guide + automated installer added
+
+- **New: `WINDOWS_SETUP.md`** — hardware requirements (sizing per stream and for 8 streams),
+  software prerequisites, install steps, port table, verification procedure, troubleshooting for
+  every real failure hit in this project, and known limitations.
+- **New: `scripts/install-windows.ps1`** — idempotent, elevation-checked prerequisite installer.
+  Parse-verified and `-WhatIf` tested; the elevation guard correctly refuses **before** downloading
+  anything rather than failing at 1603 partway through.
+
+- **Operator question answered — yes, WSL2 and Docker are both mandatory.** Docker Desktop runs the
+  containers inside a WSL2 VM; SRS/backend/dashboard/nginx are all Linux containers. On a fresh
+  machine WSL2 must be installed **and the machine rebooted** before Docker Desktop starts. This was
+  a genuine gap in the first draft — it went unnoticed because WSL2 is *already* installed here
+  (default distro `docker-desktop`, version 2). **The NDI agent remains the one component that runs
+  natively outside Docker.**
+
+- **CORRECTION to the 11:10 entry / first draft of the guide.** I wrote that "1.28.x has no Windows
+  MSI". **That was wrong.** Only the **1.28.6** directory is empty; **1.28.5 exists** and is what
+  `winget` installs. I had checked 1.28.6 and generalised from one data point. Both 1.26.11 (the
+  version NDI was actually verified against) and 1.28.5 are acceptable — the installer verifies the
+  **capability** (`gst-inspect-1.0 ndi` showing `ndisink` + `ndisinkcombiner`) rather than pinning a
+  version, which is the check that actually matters.
+
+- **winget package IDs confirmed by query, not assumed:**
+  `Docker.DockerDesktop` 4.86.0 · `gstreamerproject.gstreamer` 1.28.5 · `NDI.NDIRuntime` 6.3.2.0 ·
+  `Git.Git` · `DistroAV.DistroAV` 6.2.1 (the OBS NDI **receiver** plugin — relevant since OBS is one
+  of the target receivers).
+
+- **Firewall rules in the installer are scoped to Private+Domain profiles, never Public**, so
+  plugging into an untrusted network does not expose ingest. **Port 443 is deliberately not opened**
+  — the dashboard still has no login (rule 2).
+
+- **Still unverified and flagged as such in the guide:** NDI discovery *by browsing* (every success
+  has used an explicit `MACHINE (Source)` name), and whether the NDI firewall rules are needed at
+  all (NDI behaved identically before and after adding them).
+
 ### [2026-08-17 09:15] - Real logo wired into the dashboard (Phase 4 addition)
 
 - **What was done:** the operator supplied the Live Bridge logo artwork. It replaced the
@@ -2057,3 +2093,469 @@ adds a container, a protocol, a licensed dependency and a large amount of LAN tr
   3. **Kept the wordmark out of the visible DOM.** The logo already says "Live Bridge";
      rendering it again as text beside the image would be redundant for sighted users and
      duplicated for screen readers.
+
+### [2026-08-17 11:45] — Remote contributor access: port forwarding implemented (layers 1–3); router + CGNAT check are operator actions
+
+- **Question answered: "why is it local?"** Not a bug — it was closed on purpose, at three
+  independent layers, and opening only one or two is the usual reason a port forward
+  "doesn't work". Documented with a diagram in the new `PORT_FORWARDING.md`.
+  1. **`.env` bound all three ports to `127.0.0.1`.** That is not "LAN only", it is *this PC
+     only* — another laptop on the same desk could not reach it either.
+  2. **NAT.** This PC is `192.168.18.72`, a private address that does not exist on the
+     internet. Inbound packets hitting the router have no way to know which machine inside
+     the house they were for, so they are dropped without a forward rule.
+  3. **Windows Firewall** blocks unsolicited inbound by default, including correctly
+     forwarded packets. No Live Bridge rules existed (verified: `Get-NetFirewallRule` → none).
+
+- **Measured network facts (read-only survey):**
+
+  | Item | Value |
+  |---|---|
+  | LAN IP / adapter | `192.168.18.72/24` on `Ethernet`, **DHCP** |
+  | Gateway | `192.168.18.1` |
+  | Public IP | `103.91.141.41` — a real public address, **not** in `100.64.0.0/10` |
+  | Router UPnP | **disabled** — no IGD answered SSDP `M-SEARCH` |
+  | Docker | **not running** at the time of this work |
+
+- **The CGNAT question is still OPEN and it is the blocking item.** `103.91.141.41` is a
+  routable address, which is encouraging but **not proof**: under carrier-grade NAT the
+  address seen by `api.ipify.org` is the *carrier's*, while the router's own WAN interface
+  holds a `100.64.x.x` address and no forward can ever work. I tried to settle this without
+  the operator by querying the router's `WANIPConnection:GetExternalIPAddress` over UPnP —
+  **the router does not answer, UPnP is off**, so it needs a human to read the WAN status
+  page at `http://192.168.18.1`. Procedure and decision table are in `PORT_FORWARDING.md` §3.
+  This re-raises the same CGNAT blocker recorded in the 08:46 entry; dropping AWS did not
+  remove it.
+
+- **What was done — layers 1 and 3 implemented, layer 4 documented:**
+  - `.env`: `SRT_BIND_ADDR` and `RTMP_BIND_ADDR` `127.0.0.1` → `0.0.0.0`;
+    `HTTPS_BIND_ADDR` → `0.0.0.0` but firewall-scoped to the LAN (see below).
+  - `scripts/setup-port-forwarding.ps1` — creates the Windows Firewall rules and prints the
+    exact router table. **Dry-run by default; changes nothing without `-Apply`**, which also
+    requires elevation. `-Remove` reverses it.
+  - `scripts/check-reachability.ps1` — read-only diagnostic walking all four layers and
+    naming the one that is blocking.
+  - `PORT_FORWARDING.md` — the why, the setup, DDNS, troubleshooting, security notes.
+  - `README.md` — TOC entry plus a callout in the encoder section (rule 16).
+
+- **Exposure is deliberately asymmetric — 443 is NOT forwarded (rule 2).**
+
+  | Port | Reach | Guarded by |
+  |---|---|---|
+  | `9000/udp` SRT | internet | SRT passphrase **+** `on_publish` stream-key check |
+  | `1935/tcp` RTMP | internet | stream key only — **unencrypted, key travels in clear** |
+  | `443/tcp` dashboard | **LAN only** (`RemoteAddress=LocalSubnet`) | nothing — **there is no login** |
+
+  The dashboard has no application-level auth (requirement 12), so anything reaching it gets
+  full control of stream keys and relay destinations. It is locked twice: firewall-scoped to
+  the local subnet, and no router forward. The script will only override this with **both**
+  `-ExposeDashboardToInternet` and `-IAcceptDashboardHasNoLogin`, and refuses otherwise.
+
+- **Rule 17 gap found and fixed:** `SRT_BIND_ADDR` and `RTMP_BIND_ADDR` were read by
+  `docker-compose.yml` but **absent from `.env.example`** entirely. Both are now documented
+  there with their security implications.
+
+- **What was tested / how — executed:**
+
+  | Check | Result |
+  |---|---|
+  | `setup-port-forwarding.ps1` dry run | **PASS** — correct LAN/gateway/public IP, correct router table |
+  | Dry run changes nothing | **PASS** — `Get-NetFirewallRule` still returns none afterwards |
+  | `.env` parsing picks up the new binds | **PASS** — reports `SRT/RTMP_BIND_ADDR = 0.0.0.0` |
+  | `check-reachability.ps1` | **PASS** — correctly reports 4 blocking failures (Docker down, nothing listening, no firewall rules) |
+  | UPnP probe | ran, no IGD responded (recorded as inconclusive, not as a pass) |
+
+  Two output bugs found by **running** the scripts rather than reading them, both fixed:
+  1. `"srt://$pub:9000"` printed as `srt://` — PowerShell parsed `$pub:` as a **scope
+     qualifier**, silently swallowing the variable and the port. Fixed with `${pub}`.
+     Exactly the kind of defect that survives code review and dies on first execution.
+  2. `Note 'text' + $lanIp` passed only the first argument, so the required-forward line
+     printed with no IP. Fixed with interpolation.
+
+- **Integration gap flagged, not yet fixed — `LIVEBRIDGE_PUBLIC_HOST` is still `localhost`.**
+  The dashboard's Encoder Endpoints panel builds contributor URLs from this value, so a
+  remote contributor would be handed `srt://localhost:9000`, which resolves to **their own
+  machine** and fails with no useful error. It must become the public IP or a DDNS hostname.
+  Left unset because the right value depends on the DDNS decision below. Both scripts warn
+  about it explicitly.
+
+- **Two further operator actions recorded so they are not lost:**
+  1. **DHCP.** `192.168.18.72` came from DHCP and can move on reboot. A router forward points
+     at a fixed IP, so the forward would silently start pointing at another device — a failure
+     that looks identical to a broken forward. Needs a DHCP reservation.
+  2. **Dynamic public IP → DDNS.** The home IP rotates. Options in `PORT_FORWARDING.md` §5;
+     `krzn.site` is already owned, so an `A` record for `stream.krzn.site` is the clean path.
+
+- **SECURITY — the SRT passphrase must be rotated BEFORE the port opens.** It was exposed in
+  the 2026-08-16 13:17 session transcript via FFmpeg's stderr and, per the 13:35 entry, still
+  matches `.env`. Until now that only mattered on a loopback-bound stack; **the moment 9000/udp
+  faces the internet, an exposed passphrase is a live credential.** Rotate with
+  `scripts/gen-secrets.sh` and re-issue to encoders. Related and still open: FFmpeg stderr is
+  captured by `src/relay.js` and is **not** redacted, so it will leak the passphrase and
+  destination stream keys into logs on any relay or ingest job.
+
+- **What's still pending:** the router WAN-IP/CGNAT check (blocking), the DHCP reservation,
+  the firewall `-Apply` run, the router forwards, DDNS, `LIVEBRIDGE_PUBLIC_HOST`, passphrase
+  rotation — then a real remote contributor test, which is the only thing that proves any of it.
+
+- **Decisions/tradeoffs made:**
+  1. **Dry-run default on the firewall script.** Rule 11 gates port exposure on operator
+     go-ahead; a script that opens ports the moment it is run would route around that. `-Apply`
+     is the explicit consent, and elevation is a second gate.
+  2. **Did not automate the router.** UPnP is off, and turning it on to let a script punch its
+     own holes would be a worse security posture than typing two rules by hand.
+  3. **Did not run `-Apply` in this session.** Opening ingest to the internet while the SRT
+     passphrase is known-exposed would be actively unsafe. The rotation should come first.
+  4. **`0.0.0.0` for the dashboard rather than `127.0.0.1`**, relying on the firewall scope for
+     the restriction. This buys LAN access from other machines, which the operator wants, and
+     rule 2's "at least network-level restriction" is satisfied by `LocalSubnet` plus the
+     absent router forward. If that trade is unwanted, set `HTTPS_BIND_ADDR=127.0.0.1`.
+
+### [2026-08-17 12:05] — DDNS implemented (Cloudflare); `stream.krzn.site` not yet created
+
+- **Zone facts established by lookup, not assumption:**
+
+  | Item | Value |
+  |---|---|
+  | `krzn.site` nameservers | `haley.ns.cloudflare.com`, `ricardo.ns.cloudflare.com` — **Cloudflare** |
+  | `krzn.site` apex A | `64.29.17.65`, `216.198.79.65` (Vercel) — **untouched by this work** |
+  | `stream.krzn.site` | **does not exist** |
+
+  Cloudflare-managed DNS settles the method: an API updater, not router DDNS or No-IP.
+
+- **CRITICAL CONSTRAINT — the record must be DNS-only (grey cloud), never proxied.**
+  Cloudflare's proxy carries HTTP/HTTPS on a fixed port list only. It **cannot carry SRT
+  (UDP) or RTMP (1935/tcp) at all**. A proxied record resolves to Cloudflare's own IPs, so
+  encoders would connect to Cloudflare, which has nothing to do with the packets — and both
+  protocols fail with nothing useful in any log. Precisely the silent-failure shape this
+  project has hit four times (underscore Host header, `srt disabled` vhost, duplicate
+  backend container, `/live/` proxy_pass), so it is guarded in code rather than only in prose:
+  `ddns-update.ps1` always sends `proxied: false` and warns loudly if it finds an existing
+  record proxied.
+  - **Unavoidable tradeoff, recorded so it is not re-litigated:** DNS-only publishes the home
+    IP to anyone who resolves the hostname. There is no proxy option for self-hosted SRT.
+
+- **What was done:**
+  - `scripts/ddns-update.ps1` — Cloudflare A-record updater. **Dry-run by default**; `-Apply`
+    creates/updates; `-Install` registers a Scheduled Task (every 5 min, as `SYSTEM`, so it
+    runs with nobody logged in); `-Uninstall` removes it. TTL 60 (Cloudflare's floor) so a
+    rotation propagates in about a minute. Only calls the API when the IP actually changed.
+  - `.env` / `.env.example` — `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ZONE`, `DDNS_RECORD`
+    (rule 17). Real zone/record values in `.env`, placeholders in `.env.example`; the token
+    slot is a placeholder in both — **no secret was written or committed** (rule 1).
+  - `PORT_FORWARDING.md` §5 rewritten from generic options into concrete Cloudflare steps:
+    token scoping, record creation, task install, verification.
+
+- **Token handling:** the script reads the token **only from `.env`**, never from a parameter,
+  so it cannot land in shell history or a Scheduled Task command line. It is never printed,
+  and a `Hide()` helper redacts it from Cloudflare API error bodies before they surface.
+  Token scope documented as `Zone:DNS:Edit` + `Zone:Zone:Read` on `krzn.site` **only**, with
+  an explicit warning against the Global API Key (full account access, not independently
+  revocable).
+
+- **What was tested / how — executed:**
+
+  | Check | Result |
+  |---|---|
+  | `Resolve-DnsName krzn.site -Type NS` | PASS — Cloudflare nameservers confirmed |
+  | `Resolve-DnsName stream.krzn.site` | confirmed **NXDOMAIN** (nothing to overwrite) |
+  | `ddns-update.ps1` with placeholder token | **PASS** — exits 1, names the missing var, prints no token |
+  | `.env` parsing | **PASS** — picked up real `CLOUDFLARE_ZONE`/`DDNS_RECORD`, rejected only the placeholder token |
+
+  **Not tested:** every code path past config validation — zone lookup, record create/update,
+  proxied-record detection, and the Scheduled Task. All need a real API token, which the
+  operator has not supplied. **Recorded as unproven rather than assumed working**, consistent
+  with rule 22.
+
+- **What's still pending:** operator creates the scoped token and pastes it into `.env`, then
+  `-Apply`, then `-Install`, then `LIVEBRIDGE_PUBLIC_HOST=stream.krzn.site` + `docker compose up -d`.
+  Unchanged and still blocking everything: the router WAN-IP/CGNAT check, the DHCP reservation,
+  the router forwards, and the SRT passphrase rotation.
+
+- **Decisions/tradeoffs made:**
+  1. **Cloudflare API over router built-in DDNS.** The router would know the WAN IP first-hand,
+     which is marginally better under CGNAT, but the zone is already on Cloudflare and the
+     router's DDNS provider list will not include it. One system, one place to debug.
+  2. **Scheduled Task as `SYSTEM`, not as the logged-in user.** A streaming server must fix its
+     own DNS after an unattended reboot; a user-context task would not run until someone logs in.
+  3. **TTL 60 rather than the default 300.** Costs nothing on Cloudflare and cuts the worst-case
+     window during which contributors resolve a dead address from five minutes to one.
+  4. **Did not create the record in this session.** It needs a token that only the operator can
+     issue, and creating DNS pointing at a home IP whose ports are still closed (and whose SRT
+     passphrase is still the exposed one) would advertise an endpoint that cannot yet serve.
+
+### [2026-08-17 12:30] — Layers 1–3 PROVEN clear on the host; checker false-negative found and fixed
+
+- **Operator applied the firewall rules** (elevated `setup-port-forwarding.ps1 -Apply`). All
+  three created and enabled. Stack brought up: all four containers healthy.
+
+- **Docker Desktop is installed PER-USER, not in Program Files.** Path is
+  `C:\Users\PC\AppData\Local\Programs\DockerDesktop\Docker Desktop.exe`; the CLI is at
+  `...\DockerDesktop\resources\bin\docker.exe`. A launcher probing only
+  `$env:ProgramFiles\Docker\Docker\` finds nothing. Recorded because it will otherwise be
+  re-discovered every time something needs to start the engine. Engine came up as **29.7.2**.
+
+- **BUG FOUND AND FIXED — `check-reachability.ps1` reported "No enabled inbound Live Bridge
+  firewall rules found" for rules that existed and were enabled.**
+  `Get-NetFirewallRule -DisplayName 'Live Bridge*'` returns an **empty set** in a
+  non-elevated session on this machine — it does not raise an access error — so the checker
+  could not distinguish *"no rules"* from *"could not read the rules"* and reported the
+  alarming one. The operator's own elevated run had correctly shown all three as PASS
+  minutes earlier, which is what exposed the contradiction.
+  - **Isolating evidence:** `netsh advfirewall firewall show rule name="Live Bridge - SRT
+    ingest (UDP 9000)"` in the *same* non-elevated session returned
+    `Enabled: Yes / Direction: In / Protocol: UDP / LocalPort: 9000 / Action: Allow`.
+    Same session, same rules, opposite answers — the cmdlet was the only variable.
+  - **Fix:** layer 3 now queries the three rules by name through `netsh`, which reads them
+    without elevation, and distinguishes *missing* from *present-but-disabled*. A comment in
+    the script says not to switch it back to `Get-NetFirewallRule`.
+  - **This is the inverse of the recurring failure in this log.** The underscore bug, the
+    `srt disabled` bug and the duplicate-container bug were all **green checks hiding real
+    breakage**; this was a **red check hiding real success**. Both come from the same root
+    mistake — a probe that cannot tell "healthy" from "not measurable" — and both waste the
+    operator's time in opposite directions.
+
+- **What was tested / how — executed against the running stack:**
+
+  | Layer | Check | Result |
+  |---|---|---|
+  | 1 | `docker ps` publish bindings | **PASS** — `0.0.0.0:9000->9000/udp`, `0.0.0.0:1935->1935/tcp` |
+  | 2 | Windows listening | **PASS** — TCP 1935 on `0.0.0.0`, UDP 9000 on `0.0.0.0` |
+  | 3 | Firewall (via netsh) | **PASS** — UDP 9000 any, TCP 1935 any, TCP 443 **LocalSubnet** |
+  | 4 | Router forward | **untestable from inside the LAN** — unchanged |
+
+  The `.env` bind change from the 11:45 entry is now **proven in effect**, not just written:
+  the published bindings moved from `127.0.0.1:...` to `0.0.0.0:...`. The dashboard's
+  LAN-only scope is also confirmed live (`RemoteIP: LocalSubnet` on the 443 rule only).
+
+- **What's still pending — all operator actions, unchanged in substance:**
+  1. **Router WAN-IP / CGNAT check** — still the gate, still unanswered.
+  2. **DHCP reservation** for `192.168.18.72`.
+  3. **Router forwards** — UDP 9000 and TCP 1935.
+  4. **SRT passphrase rotation** — still the exposed value, now behind a port bound to
+     `0.0.0.0`. It is not yet *reachable* from the internet (no router forward), but the
+     margin is now one router rule instead of a loopback bind. **This should be done before
+     the forward is added, not after.**
+  5. Cloudflare token → DDNS → `LIVEBRIDGE_PUBLIC_HOST`.
+
+- **Decisions/tradeoffs made:** started Docker Desktop on the operator's behalf since they
+  were mid-sequence and it was the only thing blocking layers 1–2; nothing else about the
+  stack's configuration was changed by that action.
+
+### [2026-08-17 14:50] — Passphrase reveal/copy + OBS-complete SRT URL in the dashboard (Phase 4 addition)
+
+- **Operator request:** make the SRT passphrase visible in the dashboard, plus a one-click
+  complete SRT link for OBS. Asked first per rules 11/13 (dashboard exposure + key handling);
+  operator confirmed and additionally specified the OBS link.
+
+- **Why an OBS-specific URL is needed at all — a real defect in the old help text.** The panel
+  said *"enter the passphrase in the encoder's passphrase field"*. **OBS has no such field**,
+  and neither does FFmpeg; for both, the passphrase must be a query parameter in the URL.
+  vMix, Kiloview and Resi do have a field. The old text was therefore wrong for exactly the
+  encoder most contributors use, and is now split by encoder family.
+
+- **What was done:**
+  - `backend/src/config.js` — new `exposePassphraseInDashboard` (`EXPOSE_PASSPHRASE_IN_DASHBOARD`,
+    **default false**). `publicConfig` gains only `passphraseRevealEnabled`, a boolean — **never
+    the value**.
+  - `backend/src/routes/api.js` — new `GET /api/credentials`. Returns the passphrase only when
+    the flag is on; **404 (not 403) when disabled**, so a disabled endpoint does not advertise
+    that it would otherwise hold a secret. `Cache-Control: no-store`. Every successful read is
+    logged at `warn` with `remote_addr` and `user_agent` **and without the value**, so reads
+    leave an audit trail.
+  - `dashboard/src/components/Endpoints.jsx` — masked passphrase with Reveal/Hide + Copy, and
+    a separate "SRT for OBS / FFmpeg (passphrase included)" field. Auto re-masks after 15 s,
+    timer cleared on unmount.
+
+- **Deliberately NOT put in `publicConfig`.** That object is the contract for "safe to hand to
+  any browser"; widening it to carry a secret would mean every future consumer of it silently
+  inherits one. A separate endpoint can be disabled without touching anything else and shows
+  up on its own in the access log.
+
+- **Fetched on demand, never on mount.** Opening the dashboard to look at bitrates must not
+  pull the passphrase into browser memory or into a devtools network log. It is requested only
+  when Reveal or Copy is clicked.
+
+- **What was tested / how — executed against the running stack:**
+
+  | Check | Result |
+  |---|---|
+  | `node --check` on both backend files | PASS |
+  | `npm run build` | PASS — 352.50 kB JS (was 350 kB) |
+  | `GET /api/config` | `passphraseRevealEnabled: true`, `srtEncrypted: true` |
+  | **`GET /api/config` leaks the value?** | **NO** — grep for a passphrase value: 0 hits |
+  | `GET /api/credentials` | **200** |
+  | Returned value vs `.env` | **MATCH** (compared programmatically; value never printed) |
+  | Audit log line | present, `level: warn`, has `remote_addr`/`user_agent`, **no value** |
+
+  The comparison was done by matching lengths and equality in a variable rather than echoing
+  the passphrase — the 2026-08-16 13:17 leak happened precisely because a secret was allowed
+  to reach stdout. The temp file holding the API response was deleted immediately after.
+
+- **NOT tested — stated rather than assumed:** the `EXPOSE_PASSPHRASE_IN_DASHBOARD=false` →
+  **404** path was not exercised at runtime; it was only read in code. That is the security
+  valve for this feature, so it should be confirmed with one restart before any deployment
+  where the dashboard is less than fully trusted.
+
+- **Security posture, unchanged but now load-bearing.** This feature is only defensible while
+  **443 is LAN-only and never forwarded** (firewall `RemoteAddress=LocalSubnet`, confirmed live
+  in the 12:30 entry). There is no login, so anyone who can load the dashboard can now read the
+  single shared SRT passphrase. Flag default is `false` so this cannot be inherited accidentally
+  by another deployment; `.env` sets it `true` for this LAN-only host only.
+
+- **Still true and still pending, unaffected by this work:** the passphrase currently displayed
+  is **the exposed one from 2026-08-16 that has never been rotated**; `SRT_LATENCY_MS=100` is
+  too low for inter-province contribution and is baked into every generated URL, OBS one
+  included; `LIVEBRIDGE_PUBLIC_HOST=localhost` still makes every generated URL useless to a
+  remote contributor. **The router forward and the CGNAT check remain the actual blockers** —
+  no dashboard change moves them.
+
+### [2026-08-17 15:00] — SRT passphrase ROTATED; latency 800; reveal-disabled 404 path proven
+
+- **`gen-secrets.sh --force` was NOT used — it would have been destructive.** The script
+  regenerates `.env` **from `.env.example`**, which would have wiped the real Supabase URL and
+  service-role key, the DDNS block, and every bind address set earlier today. Per rule 4 it was
+  not run. The SRT passphrase was rotated **in place** instead: 16 random bytes from
+  `RandomNumberGenerator`, hex-encoded (32 chars, 128 bits) to satisfy the SRS entrypoint's
+  sed-substitution constraint. A timestamped `.env.bak-*` was written first.
+
+- **The 2026-08-16 exposed passphrase is now dead.** Confirmed the value changed, and confirmed
+  the running SRS container is using the new one (compared `.env` against
+  `docker exec livebridge_srs printenv`; equality asserted in a variable, values never printed).
+  **Every encoder must be reconfigured** — the old passphrase will now be refused at handshake.
+
+- **`SRT_LATENCY_MS` 100 → 800.** 100 ms is a LAN value; it leaves no room for SRT retransmits
+  over a long-haul link, so inter-province loss would have surfaced as visible artifacts rather
+  than being repaired. 800 ms is ~3–4× a realistic cross-country RTT. **Encoders must be set to
+  a latency ≥ the server's**, so this is not a server-only change. Now reflected in every URL
+  the dashboard generates.
+
+- **Closed the gap left open in the 14:50 entry: the `EXPOSE_PASSPHRASE_IN_DASHBOARD=false`
+  path is now RUNTIME-TESTED, not just read.** It was the security valve for the whole feature
+  and had only been eyeballed.
+
+  | Flag | `/api/credentials` | `/api/config` |
+  |---|---|---|
+  | `false` | **HTTP 404** | `passphraseRevealEnabled: false` |
+  | `true` | **HTTP 200** | `passphraseRevealEnabled: true` |
+
+  Also confirmed `srtLatencyMs: 800` is served to the dashboard. Flag left **`true`** (this host
+  is LAN-only).
+
+- **Minor:** a local helper named `H` collided with PowerShell's `h` alias for `Get-History`,
+  so the md5 display lines errored. The actual equality comparison was unaffected and passed.
+  Cosmetic only; recorded so the noisy output in the transcript is not mistaken for a failure.
+
+- **What's still pending — unchanged, and none of it is code:** the router WAN-IP/CGNAT check
+  (still the blocker), the two router forwards, the DHCP reservation for `192.168.18.72`, the
+  Cloudflare token → DDNS, and `LIVEBRIDGE_PUBLIC_HOST` (still `localhost`, so every generated
+  URL remains useless to a remote contributor). **Operator must also re-issue the new passphrase
+  to every encoder.**
+
+### [2026-08-17 15:20] — ROUTER_SETUP.md written; DNS dropped; public host set to the raw IP
+
+- **Operator decision: no DNS/DDNS.** Contributors connect to `103.91.141.41` directly. The
+  Cloudflare updater built earlier (`scripts/ddns-update.ps1`) is left in the repo, unused and
+  unconfigured, in case that decision reverses — the token slot in `.env` is still a placeholder.
+
+- **What was done:**
+  - `ROUTER_SETUP.md` — a focused, PLDT-ZTE-specific walkthrough: superadmin login (the stock
+    `admin` account has **no Port Forwarding menu**), the WAN/CGNAT stop-or-go check, DHCP
+    reservation, both forward rules, ZTE firewall level, verification, and exactly what to send
+    a contributor. Distinct from `PORT_FORWARDING.md`, which stays as the reference covering
+    *why* and the DNS option.
+  - `.env` — `LIVEBRIDGE_PUBLIC_HOST` `localhost` → `103.91.141.41`. Confirmed live:
+    `/api/config` now serves `publicHost: 103.91.141.41`, `srtLatencyMs: 800`.
+    **The long-standing "dashboard hands out `srt://localhost:9000`" defect is closed.**
+  - `LIVEBRIDGE_HOST` deliberately left `localhost` — it drives the TLS cert and the dashboard's
+    own URL, which stays LAN-only. Only the *encoder-facing* host changed.
+
+- **Two ZTE-specific traps documented, both silent failures:** the Protocol dropdown defaults to
+  TCP while SRT needs **UDP** (a TCP rule on 9000 produces *no* SRS log line at all, since no
+  packet arrives), and the WAN Connection dropdown offers `TR069`/VOIP interfaces that yield a
+  rule which looks correct in the table and does nothing.
+
+- **Known consequence of skipping DNS, documented in §"Because you're skipping DNS":** PLDT home
+  IPs rotate, and when that happens every contributor URL breaks simultaneously with a plain
+  timeout indistinguishable from a firewall fault. The doc gives the one-line public-IP check as
+  the first diagnostic step.
+
+- **Known cosmetic issue, not fixed:** the dashboard's HLS and HTTP-FLV preview URLs now render
+  as `https://103.91.141.41/...`. Those point at port 443, which is LAN-only by design and whose
+  cert is issued for `localhost` — so they will fail from anywhere. They were already
+  LAN-only-useful; this makes that more visible. **Do not send those two URLs to contributors.**
+  Fixing properly means rendering playback URLs from `LIVEBRIDGE_HOST` rather than
+  `LIVEBRIDGE_PUBLIC_HOST` — a small `Endpoints.jsx` change, deferred.
+
+- **What was tested / how:** `/api/config` read from the running stack after recreate —
+  `publicHost` and `srtLatencyMs` both confirmed. Router-side steps are untested by definition;
+  nothing has been forwarded yet.
+
+- **What's still pending:** the entire router side — WAN/CGNAT check, DHCP reservation, both
+  forward rules — plus re-issuing the rotated passphrase to every encoder.
+
+### [2026-08-17 16:10] — One-command setup for a new PC: setup.ps1 + export-config.ps1 + SETUP.md
+
+- **Gap addressed:** `install-windows.ps1` already automated the *prerequisites* (WSL2, Docker
+  Desktop, Git, NDI, GStreamer), but everything *after* that was still ~7 manual steps — copy
+  `.env`, generate secrets, hand-carry the Supabase service-role JWT, make a TLS cert, set bind
+  addresses, firewall, start, verify. The JWT in particular is a ~200-character value that
+  nobody retypes correctly.
+
+- **What was added:**
+  - `scripts/setup.ps1` — 9 steps, **dry-run by default**, idempotent. Preflight (starts Docker
+    Desktop and waits up to 5 min if needed) → `.env` from template → SRT passphrase generated
+    **natively** (no bash/openssl needed) → Supabase via `-ImportConfig`/skip → TLS cert → bind
+    addresses via `-Expose local|lan|wan` → firewall (delegated, needs its own elevation) →
+    `docker compose up -d --build` → health check → next steps.
+  - `scripts/export-config.ps1` — writes a migration bundle of the values that cannot be
+    regenerated. `-IncludePassphrase` carries the SRT passphrase so **existing encoders keep
+    working**; `-Protect` encrypts with PBKDF2(100k)+AES. Placeholder values are filtered out so
+    the new machine cannot inherit `your-cloudflare-scoped-dns-token`.
+  - `SETUP.md` — two commands on the old machine, two on the new one.
+
+- **Explicitly never overwritten** (re-running to change `-Expose` is safe): an existing `.env`
+  (values are updated in place), an existing SRT passphrase (rotating breaks every encoder), and
+  an existing TLS certificate.
+
+- **BUG FOUND BY TESTING, NOT BY READING — the certificate generator was broken on the exact
+  PowerShell the target machines run.** The first implementation called
+  `RSA.ExportPkcs8PrivateKey()`, which exists only on **.NET Core 3.0+ (PowerShell 7)**.
+  PowerShell 5.1 ships .NET Framework, where `RSACng` has no such method and the call fails at
+  runtime with `MethodNotFound`.
+  - **This would have failed on a fresh machine every time** — Windows ships 5.1, and the whole
+    point of the script is to run on a box where nothing is set up yet. It was caught only
+    because the cert path was exercised in isolation rather than trusted; the main dry run
+    **skipped** that step (a certificate already exists here), so the normal test path would
+    never have touched it. **A code path that is skipped locally is not a tested code path.**
+  - **Fix:** prefer `openssl` (Git for Windows ships it at `usr\bin\openssl.exe`, and
+    `install-windows.ps1` already installs Git), fall back to the native export on PowerShell 7+,
+    and otherwise **fail with an actionable message** rather than a stack trace.
+  - **Verified after the fix:** `openssl x509 -noout -subject` → `CN=localhost, O=Live Bridge`,
+    `openssl rsa -check -noout` → **RSA key ok**.
+
+- **What was tested / how — executed:**
+
+  | Check | Result |
+  |---|---|
+  | `setup.ps1` dry run | **PASS** — correct preflight, correctly skipped existing `.env`/passphrase/Supabase/cert |
+  | Dry run mutates nothing | **PASS** — `.env` file hash identical before/after |
+  | Bind-address diff detection | **PASS** — correctly proposed `0.0.0.0 -> 127.0.0.1` for `-Expose local` |
+  | `export-config.ps1` | **PASS** — exported 5 real values, **excluded the placeholder Cloudflare token** |
+  | Cert generation (isolated) | **PASS after fix** — valid cert + `RSA key ok` |
+  | `livebridge-config*.json` gitignored | **PASS** — added and confirmed via `git check-ignore` before any bundle was written |
+
+- **Not tested:** a genuine end-to-end run on a clean machine with no `.env`, no certificate and
+  no Docker. Every "create" branch was verified in isolation but never in sequence on a truly
+  bare box — that only proves out on the 32 GB PC. **Recorded as unproven rather than assumed.**
+
+- **Decisions/tradeoffs made:**
+  1. **Dry-run default,** matching the other scripts in this repo. Setup that starts mutating on
+     first invocation is hostile on a machine someone is still deciding about.
+  2. **`-Expose local` default,** not `wan`. Opening ingest to the internet must be a deliberate
+     choice; the safe default costs one re-run to change.
+  3. **Firewall delegated rather than inlined.** It needs elevation of its own, and forcing the
+     whole setup to run elevated would be a worse trade than one extra command.
+  4. **openssl preferred over the native path** even on PowerShell 7, because `install-windows.ps1`
+     already guarantees Git, and one code path exercised on every machine beats two that diverge
+     by PowerShell version.

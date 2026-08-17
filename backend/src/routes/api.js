@@ -74,6 +74,36 @@ router.get('/config', (req, res) => {
   res.json(publicConfig);
 });
 
+/**
+ * The SRT passphrase, for the dashboard's reveal/copy control.
+ *
+ * Kept OUT of GET /api/config on purpose. `publicConfig` is the contract for
+ * "safe to hand to any browser", and widening it to carry a secret would mean
+ * every future consumer of that object silently inherits one. This is a
+ * separate, explicit endpoint that can be disabled without touching anything
+ * else, and that shows up on its own in the access log.
+ *
+ * 404s - not 403 - when disabled: an endpoint that is off should not advertise
+ * that it would otherwise hold a secret.
+ */
+router.get('/credentials', (req, res) => {
+  if (!config.exposePassphraseInDashboard) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  if (!config.srt.passphrase) {
+    res.status(409).json({ error: 'no SRT passphrase is configured', srt_passphrase: null });
+    return;
+  }
+  // Logged at warn, without the value, so reads of the passphrase leave a trail.
+  log.warn('srt passphrase served to dashboard', {
+    remote_addr: req.ip,
+    user_agent: req.get('user-agent') || null,
+  });
+  res.set('Cache-Control', 'no-store');
+  res.json({ srt_passphrase: config.srt.passphrase });
+});
+
 router.get('/health', wrap(async (req, res) => {
   const srs = await srsHealthy();
   const supabase = supabaseHealth();

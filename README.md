@@ -36,6 +36,7 @@ preview — with a real-time web dashboard.
 1. [What you get](#what-you-get)
 2. [Deploy on a fresh Ubuntu server](#deploy-on-a-fresh-ubuntu-server)
 3. [Point your encoder at Live Bridge](#point-your-encoder-at-live-bridge)
+   - [Remote contributors / port forwarding](PORT_FORWARDING.md)
 4. [Adding authenticated stream sources](#adding-authenticated-stream-sources)
 5. [SRT connection modes](#srt-connection-modes)
 6. [Relaying to external platforms](#relaying-to-external-platforms)
@@ -214,6 +215,14 @@ dashboard with "Engine OK".
 
 The dashboard's **Encoder Endpoints** panel generates these URLs for any stream
 key. Replace `stream.yourdomain.com` and `studio_a` below.
+
+> **Streaming in from outside the building?** On a self-hosted PC behind a home
+> router, the encoder URLs below only work on the local network until you open
+> the path in — Docker's bind address, Windows Firewall, and the router's NAT
+> forward are three separate gates. See **[PORT_FORWARDING.md](PORT_FORWARDING.md)**,
+> and run `scripts\setup-port-forwarding.ps1` to configure the firewall and print
+> the router rules. The dashboard on 443 is deliberately **not** part of that —
+> it has no login and must stay off the internet.
 
 ### SRT — vMix
 
