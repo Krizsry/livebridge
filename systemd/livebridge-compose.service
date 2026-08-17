@@ -1,0 +1,51 @@
+# =============================================================================
+# Live Bridge - OPTIONAL: manage the Docker stack with systemd
+# =============================================================================
+# Use this ONLY if you want systemd to own the Docker deployment's lifecycle
+# (for example so `systemctl status livebridge-compose` is authoritative, or to
+# order Live Bridge against other units).
+#
+# It is NOT needed for a normal Docker deployment: `restart: unless-stopped` in
+# docker-compose.yml already restarts containers on crash and on host reboot,
+# and it does so per-container rather than restarting the whole stack. That is
+# strictly better for a streaming server, because a backend crash should not
+# interrupt SRT/RTMP ingest.
+#
+# Do NOT enable this at the same time as livebridge.service /
+# livebridge-srs.service - they are alternative deployment models and would
+# fight over ports 9000, 1935 and 443.
+#
+# Install:
+#   sudo cp systemd/livebridge-compose.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now livebridge-compose.service
+# =============================================================================
+
+[Unit]
+Description=Live Bridge - Docker Compose stack
+Documentation=file:/opt/livebridge/README.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+WorkingDirectory=/opt/livebridge
+
+# Compose itself needs the docker socket, so this unit runs as root. The
+# processes INSIDE the containers still run unprivileged (project rule 3).
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose stop
+ExecReload=/usr/bin/docker compose up -d --remove-orphans
+
+# Deliberately NOT `down -v`: that would delete volumes. Project rule 4.
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=livebridge-compose
+
+[Install]
+WantedBy=multi-user.target

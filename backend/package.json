@@ -1,0 +1,22 @@
+{
+  "name": "livebridge-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Live Bridge backend: SRS hooks, stats poller, WebSocket hub, FFmpeg relay manager, Supabase data layer",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node test/run.mjs",
+    "check": "node --check src/index.js && node -e \"import('./src/config.js').then(()=>console.log('config ok'))\""
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}

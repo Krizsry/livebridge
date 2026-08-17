@@ -1,0 +1,98 @@
+# =============================================================================
+# Live Bridge - main service (NON-DOCKER deployment)
+# =============================================================================
+# This is the alternative to docker-compose. It runs the Live Bridge backend
+# (API + WebSocket + FFmpeg relay manager) directly on the host.
+#
+# It requires livebridge-srs.service, which runs the SRS engine. Nginx is
+# managed by the distribution's own nginx.service.
+#
+# Install:
+#   sudo cp systemd/livebridge*.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now livebridge-srs.service livebridge.service
+#
+# See systemd/README.md for the full non-Docker install, including creating the
+# livebridge user and installing SRS.
+# =============================================================================
+
+[Unit]
+Description=Live Bridge - SRT/RTMP backend API, WebSocket hub and relay manager
+Documentation=file:/opt/livebridge/README.md
+After=network-online.target livebridge-srs.service
+Wants=network-online.target
+# The backend is useless without the engine, but it must not take the engine
+# down with it: Requires= would stop SRS if the backend failed. BindsTo/Requires
+# are deliberately avoided so a backend crash never interrupts live ingest.
+After=livebridge-srs.service
+
+[Service]
+Type=simple
+
+# --- Identity -----------------------------------------------------------------
+# Never root (project rule 3). Create with:
+#   sudo useradd --system --home-dir /opt/livebridge --shell /usr/sbin/nologin livebridge
+User=livebridge
+Group=livebridge
+
+WorkingDirectory=/opt/livebridge/backend
+
+# --- Configuration ------------------------------------------------------------
+# Same .env as the Docker deployment. Must be mode 600 and owned by livebridge.
+EnvironmentFile=/opt/livebridge/.env
+Environment=NODE_ENV=production
+Environment=SRS_API_URL=http://127.0.0.1:1985
+Environment=SRS_HTTP_URL=http://127.0.0.1:8080
+Environment=SRS_INTERNAL_RTMP=rtmp://127.0.0.1:1935
+Environment=SRS_INTERNAL_SRT_HOST=127.0.0.1
+
+ExecStart=/usr/bin/node /opt/livebridge/backend/src/index.js
+
+# --- Restart behaviour (requirement 13) ---------------------------------------
+Restart=always
+RestartSec=3
+# Allow frequent restarts during an incident rather than giving up: 10 restarts
+# in 60 s still leaves the unit running. StartLimitIntervalSec=0 would disable
+# the limiter entirely, which hides a genuine crash loop.
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+# --- Logging (project rule 9) --------------------------------------------------
+# The app writes structured JSON to stdout/stderr; journald captures it.
+#   journalctl -u livebridge -o cat | jq .
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=livebridge
+
+# --- Process management --------------------------------------------------------
+# The backend spawns FFmpeg children for relays. KillMode=control-group ensures
+# they are cleaned up with the unit instead of being orphaned.
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# --- Hardening -----------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+# The backend writes nothing to disk - all state is in memory or in Supabase.
+# No ReadWritePaths= is needed, which is why ProtectSystem=strict is safe here.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# FFmpeg needs to spawn; do not add NoExecPaths or MemoryDenyWriteExecute here.
+
+# --- Resource limits -----------------------------------------------------------
+# Each relay is an FFmpeg process with several sockets and file descriptors.
+LimitNOFILE=65535
+# Guard rail so a runaway relay count cannot exhaust host memory. Tune for your
+# machine; 2G is comfortable for ~16 pass-through relays.
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

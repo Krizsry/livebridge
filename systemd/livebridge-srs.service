@@ -1,0 +1,72 @@
+# =============================================================================
+# Live Bridge - SRS streaming engine (NON-DOCKER deployment)
+# =============================================================================
+# Runs the SRS binary with the Live Bridge configuration. This unit is the one
+# that must never go down: it is what actually terminates SRT and RTMP.
+#
+# The config is rendered from the template at start time so the SRT passphrase
+# comes from /opt/livebridge/.env and never sits in a world-readable file.
+# =============================================================================
+
+[Unit]
+Description=Live Bridge - SRS engine (SRT + RTMP ingest, HLS output)
+Documentation=https://ossrs.io/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+User=livebridge
+Group=livebridge
+WorkingDirectory=/opt/livebridge/srs
+
+EnvironmentFile=/opt/livebridge/.env
+
+# Render the config from the template (same script the container uses), then
+# exec SRS. RuntimeDirectory gives us /run/livebridge, owned by the service user.
+RuntimeDirectory=livebridge
+RuntimeDirectoryMode=0750
+
+ExecStart=/opt/livebridge/srs/docker-entrypoint.sh
+
+# --- Restart behaviour (requirement 13) ---------------------------------------
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=livebridge-srs
+
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# --- Hardening -----------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# SRS writes HLS segments and a pid file. These are the only writable paths.
+ReadWritePaths=/opt/livebridge/srs/objs
+ReadWritePaths=/var/lib/livebridge/hls
+
+# SRT and RTMP are both above port 1024, so no CAP_NET_BIND_SERVICE is required.
+CapabilityBoundingSet=
+
+# --- Resource limits -----------------------------------------------------------
+# One SRT connection uses several sockets; 65535 comfortably covers hundreds of
+# concurrent publishers and viewers.
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

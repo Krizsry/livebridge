@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- No login screen by design (requirement 12) - this dashboard assumes
+         network-level access control. Keep it off search engines regardless. -->
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="description" content="Live Bridge - SRT and RTMP streaming server control panel" />
+    <title>Live Bridge</title>
+    <!-- Brand assets live in public/ so they keep stable, unhashed paths that
+         index.html and the header can both reference. Generated from the master
+         logo by scripts/gen-logo-assets.ps1. -->
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/livebridge-mark.png" />
+    <meta name="theme-color" content="#0b1017" />
+  </head>
+  <body class="bg-bridge-bg">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

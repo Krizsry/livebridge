@@ -1,0 +1,258 @@
+# =============================================================================
+# Live Bridge - SRS engine configuration (SRT + RTMP ingest, HLS output)
+# =============================================================================
+# This file is a TEMPLATE. docker-entrypoint.sh substitutes the double-at
+# placeholder tokens below from environment variables at container start and
+# writes the result to /tmp/livebridge.rendered.conf, which is what SRS reads.
+#
+# Do not write a placeholder token anywhere except where it is meant to be
+# substituted - not even in a comment. The entrypoint refuses to start if any
+# remain in the rendered output, and a token mentioned in prose looks identical
+# to one that failed to substitute.
+#
+# Why a template: the SRT passphrase must come from .env and must never be
+# committed. Rendering at boot keeps the secret out of the repo entirely.
+# =============================================================================
+
+# RTMP ingest/playback. TCP 1935. Published to the host.
+listen                  1935;
+max_connections         1000;
+daemon                  off;
+
+# Log to stdout so `docker logs` and the systemd journal capture everything.
+srs_log_tank            console;
+srs_log_level           @@SRS_LOG_LEVEL@@;
+
+pid                     ./objs/srs.pid;
+work_dir                ./;
+
+# -----------------------------------------------------------------------------
+# HTTP API - the backend polls this for live publisher/viewer/bitrate stats.
+# NOT published to the host. Internal Docker network only (rule 2).
+# -----------------------------------------------------------------------------
+http_api {
+    enabled             on;
+    listen              1985;
+    crossdomain         off;
+
+    # raw_api would let anyone with network access reconfigure or kick streams.
+    # Left off deliberately - the backend does not need it.
+    raw_api {
+        enabled             off;
+        allow_reload        off;
+        allow_query         off;
+        allow_update        off;
+    }
+}
+
+# -----------------------------------------------------------------------------
+# HTTP server - serves HLS (.m3u8/.ts) and HTTP-FLV for browser preview.
+# NOT published to the host; Nginx reverse-proxies /hls/ to it over the
+# internal network and terminates TLS.
+# -----------------------------------------------------------------------------
+http_server {
+    enabled             on;
+    listen              8080;
+    dir                 ./objs/nginx/html;
+    crossdomain         on;
+}
+
+# -----------------------------------------------------------------------------
+# SRT ingest/playback. UDP 9000. Published to the host.
+# -----------------------------------------------------------------------------
+# Connection modes (requirement 4):
+#   listener    - native, this block. Encoder connects TO us. Default for
+#                 vMix / Kiloview / OBS / Resi "Caller" output.
+#   caller      - SRS's SRT server does not dial out. Live Bridge implements
+#                 caller ingest as a backend-managed FFmpeg job that pulls
+#                 srt://host:port?mode=caller and republishes to local RTMP.
+#   rendezvous  - same as caller: backend-managed FFmpeg job with
+#                 ?mode=rendezvous, for NAT-traversal between two firewalled
+#                 endpoints.
+# See README "SRT connection modes" for the exact commands.
+# -----------------------------------------------------------------------------
+srt_server {
+    enabled             on;
+    listen              9000;
+
+    # Max bandwidth, -1 = infinite (let the network decide).
+    maxbw               -1;
+
+    # Handshake timeout (ms).
+    connect_timeout     4000;
+
+    # Latency budget. Must be >= the encoder's configured latency or the
+    # receiver will drop packets it could otherwise have recovered.
+    peerlatency         @@SRT_LATENCY_MS@@;
+    recvlatency         @@SRT_LATENCY_MS@@;
+    latency             @@SRT_LATENCY_MS@@;
+
+    # Timestamp-based packet delivery + too-late packet drop: the correct
+    # combination for live contribution feeds.
+    tsbpdmode           on;
+    tlpktdrop           on;
+
+    # 10 MB socket buffers - headroom for 1080p60 contribution bitrates.
+    sendbuf             10485760;
+    recvbuf             10485760;
+
+    # 1316 = 7 x 188-byte TS packets, the standard MPEG-TS-over-UDP payload.
+    payloadsize         1316;
+
+    # Encryption (requirement 5). ONE passphrase for the whole listener - SRS
+    # has no per-streamid passphrase. Per-stream authorisation is enforced by
+    # stream ID through the on_publish hook below.
+    passphrase          @@SRT_PASSPHRASE@@;
+    pbkeylen            @@SRT_PBKEYLEN@@;
+
+    # If a publisher sends a bare streamid with no app, treat it as `live`.
+    default_app         live;
+
+    # Strip SEI to avoid confusing some downstream platforms.
+    sei_filter          on;
+
+    # Do not attempt to reorder - tsbpd already handles ordering.
+    mix_correct         off;
+}
+
+# Expose per-interface throughput in the HTTP API (used by the dashboard).
+stats {
+    network             0;
+}
+
+# -----------------------------------------------------------------------------
+# Default vhost - applies to both SRT-ingested and RTMP-ingested streams.
+# -----------------------------------------------------------------------------
+vhost __defaultVhost__ {
+
+    # Low-latency posture for live contribution.
+    tcp_nodelay         on;
+    min_latency         on;
+
+    # SRT must be enabled PER VHOST as well as on the global srt_server listener.
+    # Without this block SRS accepts the SRT handshake and then immediately refuses
+    # the session with `srt disabled, vhost=__defaultVhost__` (error 6006) - the
+    # listener being "enabled" is NOT sufficient. RTMP is unaffected, so omitting
+    # this fails ONLY the SRT half while everything else looks healthy.
+    srt {
+        enabled         on;
+        # Convert the incoming MPEG-TS/SRT into the internal RTMP pipeline so that
+        # HLS, the http_hooks (auth + session logging) and FFmpeg relay all apply
+        # to SRT sources exactly as they do to RTMP sources.
+        srt_to_rtmp     on;
+    }
+
+    play {
+        # GOP cache trades latency for instant-start. Off = lower latency.
+        gop_cache       off;
+        queue_length    10;
+        mw_latency      100;
+    }
+
+    publish {
+        # Merged-read off = lower ingest latency.
+        mr              off;
+        # Drop a publisher that stops sending for this long (ms).
+        normal_timeout  7000;
+        # Handshake/first-packet timeout (ms).
+        firstpkt_timeout 20000;
+    }
+
+    # -------------------------------------------------------------------------
+    # HTTP callbacks -> Live Bridge backend.
+    #
+    # This is the authorisation and session-logging seam for BOTH protocols:
+    #   on_publish   - validates the SRT stream ID / RTMP stream key. Returning
+    #                  a non-zero body rejects the publisher.
+    #   on_unpublish - closes the session record and stops any relays.
+    #   on_play/stop - viewer accounting.
+    #
+    # The backend answers these from an in-memory cache, so a Supabase outage
+    # cannot stall or reject ingest (requirement 21).
+    # -------------------------------------------------------------------------
+    http_hooks {
+        # WARNING: these hostnames must never contain an underscore. SRS's HTTP
+        # client rejects such hosts (invalid per RFC 1123) and the call fails
+        # silently - and because a failed on_connect makes SRS refuse the
+        # connection, every publish is rejected with nothing useful in the log.
+        # Address containers by their hyphenated network alias, not the
+        # underscored container_name.
+        enabled         on;
+
+        # on_connect is DELIBERATELY NOT SET.
+        #
+        # SRS refuses a connection outright if on_connect fails, so with it wired
+        # to the backend, a backend restart rejected EVERY publish - RTMP and SRT
+        # alike - for as long as it took to come back. The engine that "must never
+        # go down" was being taken down by its own metadata service.
+        #
+        # It bought us nothing in exchange: the handler only logged. All
+        # authorisation happens in on_publish below, which is the correct seam -
+        # it is the only hook that knows the stream key. The single loss is the
+        # tcUrl debug log line.
+        # on_connect    http://livebridge-backend:8000/api/hooks/srs/connect;
+
+        on_close        http://livebridge-backend:8000/api/hooks/srs/close;
+        on_publish      http://livebridge-backend:8000/api/hooks/srs/publish;
+        on_unpublish    http://livebridge-backend:8000/api/hooks/srs/unpublish;
+        on_play         http://livebridge-backend:8000/api/hooks/srs/play;
+        on_stop         http://livebridge-backend:8000/api/hooks/srs/stop;
+
+        # on_hls, NOT on_hls_notify. SRS issues a GET for on_hls_notify (it is the
+        # "fetch this URL per segment" variant), while the backend route is a POST
+        # handler - so every segment produced a 404, roughly 30 per minute per
+        # stream, and the hook never actually ran. on_hls POSTs the segment
+        # metadata, which is what the handler was written for all along.
+        on_hls          http://livebridge-backend:8000/api/hooks/srs/hls;
+    }
+
+    # -------------------------------------------------------------------------
+    # HLS output (requirement 9) - enabled for every source, SRT or RTMP alike.
+    # Browser preview URL (through Nginx): https://<host>/hls/live/<stream>.m3u8
+    # -------------------------------------------------------------------------
+    hls {
+        enabled         on;
+        hls_fragment    @@HLS_FRAGMENT_SEC@@;
+        hls_window      @@HLS_WINDOW_SEC@@;
+        hls_path        ./objs/nginx/html;
+        hls_m3u8_file   [app]/[stream].m3u8;
+        hls_ts_file     [app]/[stream]-[seq].ts;
+        # Delete segments once they leave the window - unbounded HLS output will
+        # fill the disk on a long event.
+        hls_cleanup     on;
+        # Remove the playlist this many seconds after the publisher leaves.
+        hls_dispose     30;
+        hls_wait_keyframe on;
+    }
+
+    # HTTP-FLV remux - lower-latency browser preview than HLS (~1-2 s vs ~6 s).
+    # Available at https://<host>/live/<stream>.flv through Nginx.
+    http_remux {
+        enabled         on;
+        mount           [vhost]/[app]/[stream].flv;
+        hstrs           on;
+    }
+
+    # -------------------------------------------------------------------------
+    # Static forwarding is intentionally DISABLED.
+    #
+    # External relay targets (YouTube / Facebook / Twitch) are managed by the
+    # backend as FFmpeg processes instead, so destinations can be added and
+    # removed from the dashboard at runtime. A static `forward` block would
+    # require an SRS reload to change, which interrupts live ingest.
+    #
+    # Reference only - do not enable unless you want a fixed, restart-to-change
+    # destination:
+    #
+    # forward {
+    #     enabled  on;
+    #     destination 127.0.0.1:1936;
+    # }
+    # -------------------------------------------------------------------------
+
+    # DVR is off: Live Bridge is a bridge, not an archiver. Enable per-event if
+    # you need local recording, and watch disk usage.
+    dvr {
+        enabled         off;
+    }
+}

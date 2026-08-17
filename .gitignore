@@ -1,0 +1,31 @@
+# --- Secrets: never commit (rule 1) ---
+# .mcp.json holds a Supabase PERSONAL ACCESS TOKEN (sbp_...), which is
+# account-level - broader than a service role key. It must never be committed.
+.mcp.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+nginx/certs/
+supabase/.temp/
+
+# --- Dependencies / build output ---
+node_modules/
+dashboard/dist/
+backend/node_modules/
+dashboard/node_modules/
+
+# --- Runtime data ---
+srs/objs/
+srs/logs/
+data/
+hls/
+*.log
+
+# --- Editor / OS ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
